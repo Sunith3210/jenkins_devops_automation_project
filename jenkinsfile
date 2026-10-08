@@ -18,17 +18,39 @@ pipeline {
             }
         }
 
-        stage('Create Feature Branch') {
+        stage('Prepare Feature Branch') {
             steps {
                 script {
-                    env.FEATURE_BRANCH =
-                        "feature/config-${params.ENVIRONMENT}-${params.NODE}-${env.BUILD_NUMBER}"
 
-                    sh """
-                        git checkout -b ${FEATURE_BRANCH}
-                    """
+                    /*
+                     * ONE FIXED FEATURE BRANCH
+                     */
+                    env.FEATURE_BRANCH = "feature/config-update"
 
-                    echo "Feature Branch: ${FEATURE_BRANCH}"
+                    sh '''
+                        git fetch origin main
+
+                        git checkout main
+                        git reset --hard origin/main
+
+                        git fetch origin feature/config-update || true
+
+                        if git ls-remote --exit-code --heads origin feature/config-update > /dev/null 2>&1
+                        then
+                            echo "Feature branch already exists."
+
+                            git checkout -B feature/config-update origin/main
+                        else
+                            echo "Feature branch does not exist. Creating it..."
+
+                            git checkout -b feature/config-update
+                        fi
+
+                        echo "Current branch:"
+                        git branch --show-current
+                    '''
+
+                    echo "Feature Branch: ${env.FEATURE_BRANCH}"
                 }
             }
         }
@@ -74,15 +96,33 @@ pipeline {
 
         stage('Commit Changes') {
             steps {
-                sh """
-                    git config user.name "Jenkins"
-                    git config user.email "jenkins@localhost"
+                script {
 
-                    git add environment/${params.ENVIRONMENT}.json
-                    git add node/${params.NODE}.json
+                    sh '''
+                        git config user.name "Jenkins"
+                        git config user.email "jenkins@localhost"
 
-                    git commit -m "Automated config update for ${params.ENVIRONMENT} and ${params.NODE}"
-                """
+                        git add environment/*.json
+                        git add node/*.json
+                    '''
+
+                    def changes = sh(
+                        script: 'git diff --cached --quiet',
+                        returnStatus: true
+                    )
+
+                    if (changes == 0) {
+
+                        echo "No changes detected."
+                        currentBuild.result = 'SUCCESS'
+
+                    } else {
+
+                        sh """
+                            git commit -m "Automated configuration update - ${params.ENVIRONMENT} - ${params.NODE}"
+                        """
+                    }
+                }
             }
         }
 
@@ -97,14 +137,18 @@ pipeline {
                 ]) {
 
                     sh '''
-                        git push https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/chvkarthik-87/jenkins-config-automation.git ${FEATURE_BRANCH}
+                        git push \
+                        https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/chvkarthik-87/jenkins-config-automation.git \
+                        feature/config-update \
+                        --force
                     '''
                 }
             }
         }
 
-        stage('Create Pull Request Automatically') {
+        stage('Create or Get Pull Request') {
             steps {
+
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'github-jenkins-token',
@@ -115,63 +159,91 @@ pipeline {
 
                     script {
 
-                        sh '''
-                            cat > pr.json <<EOF
-{
-  "title": "Automated config update - Build ${BUILD_NUMBER}",
-  "head": "${FEATURE_BRANCH}",
-  "base": "main",
-  "body": "This Pull Request was automatically created by Jenkins."
-}
-EOF
-                        '''
+                        /*
+                         * First check whether a PR already exists
+                         * for feature/config-update.
+                         */
 
                         sh '''
-                            curl -sS -X POST \
+                            curl -sS \
                               -H "Authorization: Bearer ${GITHUB_TOKEN}" \
                               -H "Accept: application/vnd.github+json" \
                               -H "X-GitHub-Api-Version: 2022-11-28" \
-                              https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls \
-                              --data-binary @pr.json \
-                              > pr-response.json
+                              "https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls?state=open&head=chvkarthik-87:feature/config-update&base=main" \
+                              > existing-pr.json
                         '''
 
-                        echo "===== GITHUB PR RESPONSE ====="
-
-                        sh 'cat pr-response.json'
-
-                        sh 'rm -f pr.json'
-
-                        /*
-                         * GitHub response contains:
-                         *
-                         * "number": 3,
-                         *
-                         * Spaces may exist around the colon.
-                         * Therefore the old grep command was failing.
-                         */
-
-                        def prNumber = sh(
+                        def existingPrNumber = sh(
                             script: '''
-                                grep -o '"number"[[:space:]]*:[[:space:]]*[0-9]*' pr-response.json |
+                                grep -o '"number"[[:space:]]*:[[:space:]]*[0-9]*' existing-pr.json |
                                 head -1 |
-                                grep -o '[0-9]*$'
+                                grep -o '[0-9]*$' || true
                             ''',
                             returnStdout: true
                         ).trim()
 
-                        if (!prNumber) {
-                            echo "===== PR NUMBER EXTRACTION FAILED ====="
+                        if (existingPrNumber) {
+
+                            echo "======================================"
+                            echo "EXISTING PULL REQUEST FOUND"
+                            echo "PR NUMBER: ${existingPrNumber}"
+                            echo "======================================"
+
+                            env.PR_NUMBER = existingPrNumber
+
+                        } else {
+
+                            echo "No open PR found."
+                            echo "Creating new Pull Request..."
+
+                            sh '''
+                                cat > pr.json <<EOF
+{
+  "title": "Automated Configuration Update",
+  "head": "feature/config-update",
+  "base": "main",
+  "body": "This Pull Request was automatically created by Jenkins."
+}
+EOF
+                            '''
+
+                            sh '''
+                                curl -sS -X POST \
+                                  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                                  -H "Accept: application/vnd.github+json" \
+                                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                                  https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls \
+                                  --data-binary @pr.json \
+                                  > pr-response.json
+                            '''
+
+                            echo "===== GITHUB PR RESPONSE ====="
+
                             sh 'cat pr-response.json'
-                            error("PR was created, but PR number could not be extracted.")
+
+                            def newPrNumber = sh(
+                                script: '''
+                                    grep -o '"number"[[:space:]]*:[[:space:]]*[0-9]*' pr-response.json |
+                                    head -1 |
+                                    grep -o '[0-9]*$'
+                                ''',
+                                returnStdout: true
+                            ).trim()
+
+                            if (!newPrNumber) {
+
+                                sh 'cat pr-response.json'
+
+                                error("Pull Request creation failed.")
+                            }
+
+                            env.PR_NUMBER = newPrNumber
+
+                            echo "======================================"
+                            echo "NEW PULL REQUEST CREATED"
+                            echo "PR NUMBER: ${env.PR_NUMBER}"
+                            echo "======================================"
                         }
-
-                        env.PR_NUMBER = prNumber
-
-                        echo "======================================"
-                        echo "PR CREATED AUTOMATICALLY"
-                        echo "PR NUMBER: ${env.PR_NUMBER}"
-                        echo "======================================"
                     }
                 }
             }
@@ -179,6 +251,7 @@ EOF
 
         stage('Check Pull Request') {
             steps {
+
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'github-jenkins-token',
@@ -191,23 +264,17 @@ EOF
 
                         def mergeableState = ""
 
-                        /*
-                         * GitHub can initially return mergeable_state
-                         * as "unknown".
-                         *
-                         * We wait and check multiple times.
-                         */
-
                         for (int i = 1; i <= 6; i++) {
 
-                            echo "Checking Pull Request... Attempt ${i}/6"
+                            echo "Checking Pull Request..."
+                            echo "Attempt ${i}/6"
 
                             sh '''
                                 curl -sS \
                                   -H "Authorization: Bearer ${GITHUB_TOKEN}" \
                                   -H "Accept: application/vnd.github+json" \
                                   -H "X-GitHub-Api-Version: 2022-11-28" \
-                                  https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER} \
+                                  "https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER}" \
                                   > pr-status.json
                             '''
 
@@ -233,30 +300,34 @@ EOF
                             echo "Mergeable State: ${mergeableState}"
 
                             if (prState != "open") {
-                                error("PR is not open.")
+                                error("Pull Request is not open.")
                             }
 
                             if (mergeableState == "dirty") {
-                                error("PR has merge conflicts.")
+                                error("Pull Request has merge conflicts.")
                             }
 
                             if (mergeableState == "blocked") {
-                                error("PR is blocked by branch protection or required checks.")
+                                error("Pull Request is blocked.")
                             }
 
-                            if (mergeableState != "unknown" && mergeableState != "") {
+                            if (mergeableState != "unknown" &&
+                                mergeableState != "") {
                                 break
                             }
 
                             echo "GitHub is still calculating mergeability..."
+
                             sleep time: 5, unit: 'SECONDS'
                         }
 
-                        if (mergeableState == "unknown" || mergeableState == "") {
-                            error("GitHub could not determine PR mergeability.")
+                        if (mergeableState == "unknown" ||
+                            mergeableState == "") {
+
+                            error("GitHub could not determine mergeability.")
                         }
 
-                        echo "Pull Request is ready for automatic merge."
+                        echo "Pull Request is ready for merge."
                     }
                 }
             }
@@ -264,6 +335,7 @@ EOF
 
         stage('Merge Pull Request Automatically') {
             steps {
+
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'github-jenkins-token',
@@ -281,7 +353,7 @@ EOF
                               -H "Authorization: Bearer ${GITHUB_TOKEN}" \
                               -H "Accept: application/vnd.github+json" \
                               -H "X-GitHub-Api-Version: 2022-11-28" \
-                              https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER}/merge \
+                              "https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER}/merge" \
                               -d '{"merge_method":"merge"}' \
                               > merge-response.json
                         '''
@@ -310,9 +382,10 @@ EOF
                         } else {
 
                             echo "===== MERGE FAILED ====="
+
                             sh 'cat merge-response.json'
 
-                            error("Automatic PR merge failed.")
+                            error("Automatic Pull Request merge failed.")
                         }
                     }
                 }
@@ -321,6 +394,7 @@ EOF
 
         stage('Verify Main Branch') {
             steps {
+
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'github-jenkins-token',
@@ -347,7 +421,9 @@ EOF
 
                         sh 'cat main-verification.json'
 
+                        echo "======================================"
                         echo "MAIN BRANCH UPDATE VERIFIED"
+                        echo "======================================"
                     }
                 }
             }
@@ -361,11 +437,11 @@ EOF
             echo "AUTOMATION SUCCESSFUL"
             echo "======================================"
             echo "1. Parameters received"
-            echo "2. Feature branch created"
+            echo "2. Single feature branch used"
             echo "3. JSON files updated"
             echo "4. Changes committed"
             echo "5. Feature branch pushed"
-            echo "6. Pull Request created"
+            echo "6. Pull Request created/found"
             echo "7. Pull Request merged automatically"
             echo "8. Main branch updated"
             echo "======================================"
