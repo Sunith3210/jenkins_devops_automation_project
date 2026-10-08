@@ -112,9 +112,10 @@ pipeline {
         stage('Create Pull Request') {
             steps {
                 withCredentials([
-                    string(
+                    usernamePassword(
                         credentialsId: 'github-jenkins-token',
-                        variable: 'GITHUB_TOKEN'
+                        usernameVariable: 'GITHUB_USERNAME',
+                        passwordVariable: 'GITHUB_TOKEN'
                     )
                 ]) {
 
@@ -131,6 +132,9 @@ pipeline {
                             ''',
                             returnStdout: true
                         ).trim()
+
+                        echo "GitHub Response:"
+                        echo response
 
                         def pr = new groovy.json.JsonSlurperClassic().parseText(response)
 
@@ -150,22 +154,39 @@ pipeline {
         stage('Merge Pull Request') {
             steps {
                 withCredentials([
-                    string(
+                    usernamePassword(
                         credentialsId: 'github-jenkins-token',
-                        variable: 'GITHUB_TOKEN'
+                        usernameVariable: 'GITHUB_USERNAME',
+                        passwordVariable: 'GITHUB_TOKEN'
                     )
                 ]) {
 
-                    sh '''
-                        curl -sS -X PUT \
-                        -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                        -H "Accept: application/vnd.github+json" \
-                        -H "X-GitHub-Api-Version: 2022-11-28" \
-                        https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER}/merge \
-                        -d '{"merge_method":"merge"}'
-                    '''
+                    script {
 
-                    echo "Pull Request ${PR_NUMBER} merge request sent."
+                        def mergeResponse = sh(
+                            script: '''
+                                curl -sS -X PUT \
+                                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                                -H "Accept: application/vnd.github+json" \
+                                -H "X-GitHub-Api-Version: 2022-11-28" \
+                                https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER}/merge \
+                                -d '{"merge_method":"merge"}'
+                            ''',
+                            returnStdout: true
+                        ).trim()
+
+                        echo "Merge Response:"
+                        echo mergeResponse
+
+                        def mergeResult =
+                            new groovy.json.JsonSlurperClassic().parseText(mergeResponse)
+
+                        if (mergeResult.merged != true) {
+                            error("Pull Request merge failed: ${mergeResponse}")
+                        }
+
+                        echo "Pull Request ${PR_NUMBER} merged successfully."
+                    }
                 }
             }
         }
@@ -175,6 +196,7 @@ pipeline {
         success {
             echo "======================================"
             echo "CONFIGURATION AUTOMATION SUCCESSFUL"
+            echo "======================================"
             echo "Feature branch created"
             echo "JSON files updated"
             echo "Feature branch pushed"
