@@ -35,9 +35,11 @@ pipeline {
                         if git ls-remote --exit-code --heads origin feature/config-update > /dev/null 2>&1
                         then
                             echo "Feature branch already exists."
+
                             git checkout -B feature/config-update origin/main
                         else
                             echo "Feature branch does not exist. Creating it..."
+
                             git checkout -b feature/config-update
                         fi
 
@@ -89,29 +91,21 @@ pipeline {
             }
         }
 
-        /*
-         * SONARQUBE ANALYSIS
-         */
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('SonarQube') {
-                    sh '''
-                        sonar-scanner \
-                          -Dsonar.projectKey=jenkins-config-automation \
-                          -Dsonar.projectName=jenkins-config-automation \
-                          -Dsonar.sources=.
-                    '''
-                }
-            }
-        }
+                script {
 
-        /*
-         * SONARQUBE QUALITY GATE
-         */
-        stage('SonarQube Quality Gate') {
-            steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
+                    def scannerHome = tool 'SonarQube-Scanner'
+
+                    withSonarQubeEnv('SonarQube') {
+
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                              -Dsonar.projectKey=jenkins-config-automation \
+                              -Dsonar.projectName=jenkins-config-automation \
+                              -Dsonar.sources=.
+                        """
+                    }
                 }
             }
         }
@@ -136,6 +130,7 @@ pipeline {
                     if (changes == 0) {
 
                         echo "No changes detected."
+
                         currentBuild.result = 'SUCCESS'
 
                     } else {
@@ -150,6 +145,7 @@ pipeline {
 
         stage('Push Feature Branch') {
             steps {
+
                 withCredentials([
                     usernamePassword(
                         credentialsId: 'github-jenkins-token',
@@ -457,12 +453,11 @@ EOF
             echo "2. Single feature branch used"
             echo "3. JSON files updated"
             echo "4. SonarQube analysis completed"
-            echo "5. SonarQube Quality Gate passed"
-            echo "6. Changes committed"
-            echo "7. Feature branch pushed"
-            echo "8. Pull Request created/found"
-            echo "9. Pull Request merged automatically"
-            echo "10. Main branch updated"
+            echo "5. Changes committed"
+            echo "6. Feature branch pushed"
+            echo "7. Pull Request created/found"
+            echo "8. Pull Request merged automatically"
+            echo "9. Main branch updated"
             echo "======================================"
         }
 
