@@ -22,9 +22,6 @@ pipeline {
             steps {
                 script {
 
-                    /*
-                     * ONE FIXED FEATURE BRANCH
-                     */
                     env.FEATURE_BRANCH = "feature/config-update"
 
                     sh '''
@@ -38,11 +35,9 @@ pipeline {
                         if git ls-remote --exit-code --heads origin feature/config-update > /dev/null 2>&1
                         then
                             echo "Feature branch already exists."
-
                             git checkout -B feature/config-update origin/main
                         else
                             echo "Feature branch does not exist. Creating it..."
-
                             git checkout -b feature/config-update
                         fi
 
@@ -91,6 +86,33 @@ pipeline {
                     echo "===== GIT DIFF ====="
                     git diff
                 """
+            }
+        }
+
+        /*
+         * SONARQUBE ANALYSIS
+         */
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh '''
+                        sonar-scanner \
+                          -Dsonar.projectKey=jenkins-config-automation \
+                          -Dsonar.projectName=jenkins-config-automation \
+                          -Dsonar.sources=.
+                    '''
+                }
+            }
+        }
+
+        /*
+         * SONARQUBE QUALITY GATE
+         */
+        stage('SonarQube Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
             }
         }
 
@@ -158,11 +180,6 @@ pipeline {
                 ]) {
 
                     script {
-
-                        /*
-                         * First check whether a PR already exists
-                         * for feature/config-update.
-                         */
 
                         sh '''
                             curl -sS \
@@ -439,11 +456,13 @@ EOF
             echo "1. Parameters received"
             echo "2. Single feature branch used"
             echo "3. JSON files updated"
-            echo "4. Changes committed"
-            echo "5. Feature branch pushed"
-            echo "6. Pull Request created/found"
-            echo "7. Pull Request merged automatically"
-            echo "8. Main branch updated"
+            echo "4. SonarQube analysis completed"
+            echo "5. SonarQube Quality Gate passed"
+            echo "6. Changes committed"
+            echo "7. Feature branch pushed"
+            echo "8. Pull Request created/found"
+            echo "9. Pull Request merged automatically"
+            echo "10. Main branch updated"
             echo "======================================"
         }
 
