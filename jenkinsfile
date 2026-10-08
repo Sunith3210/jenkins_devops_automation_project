@@ -7,12 +7,10 @@ pipeline {
             steps {
                 echo "Environment: ${params.ENVIRONMENT}"
                 echo "Node: ${params.NODE}"
-
                 echo "App Name: ${params.ENV_APPNAME}"
                 echo "Version: ${params.ENV_VERSION}"
                 echo "Replicas: ${params.ENV_REPLICAS}"
                 echo "Log Level: ${params.ENV_LOGLEVEL}"
-
                 echo "Node Name: ${params.NODE_NAME}"
                 echo "Node Type: ${params.NODE_TYPE}"
                 echo "Region: ${params.NODE_REGION}"
@@ -55,10 +53,6 @@ pipeline {
                         sed -i -E 's/^  "region": "[^"]*",/  "region": "${params.NODE_REGION}",/' ${nodeFile}
                         sed -i -E 's/^  "availabilityZone": "[^"]*",/  "availabilityZone": "${params.NODE_AZ}",/' ${nodeFile}
                     """
-
-                    echo "Updated:"
-                    echo envFile
-                    echo nodeFile
                 }
             }
         }
@@ -66,13 +60,13 @@ pipeline {
         stage('Show Changes') {
             steps {
                 sh """
-                    echo "===== Environment JSON ====="
+                    echo "===== ENVIRONMENT FILE ====="
                     cat environment/${params.ENVIRONMENT}.json
 
-                    echo "===== Node JSON ====="
+                    echo "===== NODE FILE ====="
                     cat node/${params.NODE}.json
 
-                    echo "===== Git Changes ====="
+                    echo "===== CHANGES ====="
                     git diff
                 """
             }
@@ -109,7 +103,7 @@ pipeline {
             }
         }
 
-        stage('Create Pull Request') {
+        stage('Create Pull Request Automatically') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -121,37 +115,52 @@ pipeline {
 
                     script {
 
+                        sh '''
+                            cat > pr.json <<EOF
+{
+  "title": "Automated config update - Build ${BUILD_NUMBER}",
+  "head": "${FEATURE_BRANCH}",
+  "base": "main",
+  "body": "This Pull Request was automatically created by Jenkins."
+}
+EOF
+                        '''
+
                         def response = sh(
                             script: '''
                                 curl -sS -X POST \
-                                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                                -H "Accept: application/vnd.github+json" \
-                                -H "X-GitHub-Api-Version: 2022-11-28" \
-                                https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls \
-                                -d "{\"title\":\"Automated config update - ${BUILD_NUMBER}\",\"head\":\"${FEATURE_BRANCH}\",\"base\":\"main\",\"body\":\"Automated configuration update from Jenkins.\"}"
+                                  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                                  -H "Accept: application/vnd.github+json" \
+                                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                                  "https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls" \
+                                  --data-binary @pr.json
                             ''',
                             returnStdout: true
                         ).trim()
 
-                        echo "GitHub Response:"
+                        sh 'rm -f pr.json'
+
+                        echo "GitHub PR Response:"
                         echo response
 
-                        def pr = new groovy.json.JsonSlurperClassic().parseText(response)
+                        def pr =
+                            new groovy.json.JsonSlurperClassic().parseText(response)
 
                         if (!pr.number) {
-                            error("Pull Request creation failed: ${response}")
+                            error("PR creation failed: ${response}")
                         }
 
                         env.PR_NUMBER = pr.number.toString()
 
-                        echo "Pull Request Number: ${env.PR_NUMBER}"
-                        echo "Pull Request URL: ${pr.html_url}"
+                        echo "PR CREATED AUTOMATICALLY"
+                        echo "PR Number: ${env.PR_NUMBER}"
+                        echo "PR URL: ${pr.html_url}"
                     }
                 }
             }
         }
 
-        stage('Merge Pull Request') {
+        stage('Merge Pull Request Automatically') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -163,29 +172,43 @@ pipeline {
 
                     script {
 
+                        sh '''
+                            cat > merge.json <<EOF
+{
+  "merge_method": "merge"
+}
+EOF
+                        '''
+
                         def mergeResponse = sh(
                             script: '''
                                 curl -sS -X PUT \
-                                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                                -H "Accept: application/vnd.github+json" \
-                                -H "X-GitHub-Api-Version: 2022-11-28" \
-                                https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER}/merge \
-                                -d '{"merge_method":"merge"}'
+                                  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                                  -H "Accept: application/vnd.github+json" \
+                                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                                  "https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER}/merge" \
+                                  --data-binary @merge.json
                             ''',
                             returnStdout: true
                         ).trim()
 
-                        echo "Merge Response:"
+                        sh 'rm -f merge.json'
+
+                        echo "GitHub Merge Response:"
                         echo mergeResponse
 
-                        def mergeResult =
+                        def result =
                             new groovy.json.JsonSlurperClassic().parseText(mergeResponse)
 
-                        if (mergeResult.merged != true) {
-                            error("Pull Request merge failed: ${mergeResponse}")
+                        if (result.merged != true) {
+                            error("Automatic merge failed: ${mergeResponse}")
                         }
 
-                        echo "Pull Request ${PR_NUMBER} merged successfully."
+                        echo "======================================"
+                        echo "PR MERGED AUTOMATICALLY"
+                        echo "PR Number: ${PR_NUMBER}"
+                        echo "MAIN BRANCH UPDATED"
+                        echo "======================================"
                     }
                 }
             }
@@ -195,13 +218,14 @@ pipeline {
     post {
         success {
             echo "======================================"
-            echo "CONFIGURATION AUTOMATION SUCCESSFUL"
+            echo "AUTOMATION SUCCESSFUL"
             echo "======================================"
-            echo "Feature branch created"
-            echo "JSON files updated"
-            echo "Feature branch pushed"
-            echo "Pull Request created"
-            echo "Pull Request merged"
+            echo "1. JSON updated"
+            echo "2. Feature branch created"
+            echo "3. Feature branch pushed"
+            echo "4. PR created automatically"
+            echo "5. PR merged automatically"
+            echo "6. Main branch updated"
             echo "======================================"
         }
 
