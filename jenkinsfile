@@ -142,18 +142,28 @@ EOF
 
                         sh 'rm -f pr.json'
 
+                        /*
+                         * GitHub response contains:
+                         *
+                         * "number": 3,
+                         *
+                         * Spaces may exist around the colon.
+                         * Therefore the old grep command was failing.
+                         */
+
                         def prNumber = sh(
                             script: '''
-                                grep -o '"number":[0-9]*' pr-response.json |
+                                grep -o '"number"[[:space:]]*:[[:space:]]*[0-9]*' pr-response.json |
                                 head -1 |
-                                cut -d: -f2
+                                grep -o '[0-9]*$'
                             ''',
                             returnStdout: true
                         ).trim()
 
                         if (!prNumber) {
+                            echo "===== PR NUMBER EXTRACTION FAILED ====="
                             sh 'cat pr-response.json'
-                            error("PR creation failed.")
+                            error("PR was created, but PR number could not be extracted.")
                         }
 
                         env.PR_NUMBER = prNumber
@@ -179,59 +189,74 @@ EOF
 
                     script {
 
-                        echo "Waiting for GitHub to calculate merge status..."
+                        def mergeableState = ""
 
-                        sleep time: 5, unit: 'SECONDS'
+                        /*
+                         * GitHub can initially return mergeable_state
+                         * as "unknown".
+                         *
+                         * We wait and check multiple times.
+                         */
 
-                        sh '''
-                            curl -sS \
-                              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                              -H "Accept: application/vnd.github+json" \
-                              -H "X-GitHub-Api-Version: 2022-11-28" \
-                              https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER} \
-                              > pr-status.json
-                        '''
+                        for (int i = 1; i <= 6; i++) {
 
-                        echo "===== PR STATUS ====="
+                            echo "Checking Pull Request... Attempt ${i}/6"
 
-                        sh 'cat pr-status.json'
+                            sh '''
+                                curl -sS \
+                                  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                                  -H "Accept: application/vnd.github+json" \
+                                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                                  https://api.github.com/repos/chvkarthik-87/jenkins-config-automation/pulls/${PR_NUMBER} \
+                                  > pr-status.json
+                            '''
 
-                        def prState = sh(
-                            script: '''
-                                grep -o '"state":"[^"]*"' pr-status.json |
-                                head -1 |
-                                cut -d'"' -f4
-                            ''',
-                            returnStdout: true
-                        ).trim()
+                            def prState = sh(
+                                script: '''
+                                    grep -o '"state"[[:space:]]*:[[:space:]]*"[^"]*"' pr-status.json |
+                                    head -1 |
+                                    sed 's/.*"state"[[:space:]]*:[[:space:]]*"//; s/".*//'
+                                ''',
+                                returnStdout: true
+                            ).trim()
 
-                        def mergeableState = sh(
-                            script: '''
-                                grep -o '"mergeable_state":"[^"]*"' pr-status.json |
-                                head -1 |
-                                cut -d'"' -f4
-                            ''',
-                            returnStdout: true
-                        ).trim()
+                            mergeableState = sh(
+                                script: '''
+                                    grep -o '"mergeable_state"[[:space:]]*:[[:space:]]*"[^"]*"' pr-status.json |
+                                    head -1 |
+                                    sed 's/.*"mergeable_state"[[:space:]]*:[[:space:]]*"//; s/".*//'
+                                ''',
+                                returnStdout: true
+                            ).trim()
 
-                        echo "PR State: ${prState}"
-                        echo "Mergeable State: ${mergeableState}"
+                            echo "PR State: ${prState}"
+                            echo "Mergeable State: ${mergeableState}"
 
-                        if (prState != "open") {
-                            error("PR is not open.")
+                            if (prState != "open") {
+                                error("PR is not open.")
+                            }
+
+                            if (mergeableState == "dirty") {
+                                error("PR has merge conflicts.")
+                            }
+
+                            if (mergeableState == "blocked") {
+                                error("PR is blocked by branch protection or required checks.")
+                            }
+
+                            if (mergeableState != "unknown" && mergeableState != "") {
+                                break
+                            }
+
+                            echo "GitHub is still calculating mergeability..."
+                            sleep time: 5, unit: 'SECONDS'
                         }
 
-                        if (mergeableState == "dirty") {
-                            error("PR has merge conflicts.")
+                        if (mergeableState == "unknown" || mergeableState == "") {
+                            error("GitHub could not determine PR mergeability.")
                         }
 
-                        if (mergeableState == "blocked") {
-                            error("PR is blocked by GitHub branch protection or required checks.")
-                        }
-
-                        if (mergeableState == "unknown") {
-                            echo "GitHub is still calculating mergeability."
-                        }
+                        echo "Pull Request is ready for automatic merge."
                     }
                 }
             }
@@ -267,9 +292,9 @@ EOF
 
                         def merged = sh(
                             script: '''
-                                grep -o '"merged":[a-z]*' merge-response.json |
+                                grep -o '"merged"[[:space:]]*:[[:space:]]*[a-z]*' merge-response.json |
                                 head -1 |
-                                cut -d: -f2
+                                sed 's/.*:[[:space:]]*//'
                             ''',
                             returnStdout: true
                         ).trim()
