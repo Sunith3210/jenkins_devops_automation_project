@@ -1,0 +1,14 @@
+pipeline {
+    agent any
+
+    stages {
+
+        stage('Test Parameters') {
+            steps {
+                echo "Environment: ${params.ENVIRONMENT}"
+                echo "Node: ${params.NODE}"
+            }
+        }
+
+    }
+}
