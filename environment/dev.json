@@ -1,6 +1,6 @@
 {
   "environment": "dev",
-  "appName": "myapp",
+  "appName": "chintu",
   "version": "2.0.0",
   "replicas": 1,
   "logLevel": "INFO",
