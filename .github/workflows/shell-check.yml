@@ -1,0 +1,82 @@
+
+name: Shell Script Quality Checks
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-check:
+    name: Shell Script Quality Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck and shfmt
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck shfmt
+
+      - name: Find shell scripts
+        id: scripts
+        shell: bash
+        run: |
+          mapfile -t scripts < <(find . \
+            -type d \( -name .git -o -name .github -o -name node_modules \) -prune \
+            -o -type f -name '*.sh' -print | sort)
+
+          if [ "${#scripts[@]}" -eq 0 ]; then
+            echo "No .sh files found; there are no standalone shell scripts to check."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            printf 'Checking %s shell script(s):\n' "${#scripts[@]}"
+            printf '%s\n' "${scripts[@]}"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check Bash syntax
+        if: steps.scripts.outputs.found == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            echo "Checking Bash syntax: $file"
+            bash -n "$file"
+          done < <(
+            find . \
+              -type d \( -name .git -o -name .github -o -name node_modules \) -prune \
+              -o -type f -name '*.sh' -print0
+          )
+
+      - name: Check scripts with ShellCheck
+        if: steps.scripts.outputs.found == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . \
+            -type d \( -name .git -o -name .github -o -name node_modules \) -prune \
+            -o -type f -name '*.sh' -print0 |
+            xargs -0 -r shellcheck
+
+      - name: Check indentation and formatting with shfmt
+        if: steps.scripts.outputs.found == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          find . \
+            -type d \( -name .git -o -name .github -o -name node_modules \) -prune \
+            -o -type f -name '*.sh' -print0 |
+            xargs -0 -r shfmt -d -i 4
+
+      - name: Report success
+        run: echo "All available shell script checks passed."
