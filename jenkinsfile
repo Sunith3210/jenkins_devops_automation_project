@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -6,25 +5,26 @@ pipeline {
         timestamps()
         disableConcurrentBuilds()
         skipDefaultCheckout(true)
+        timeout(time: 45, unit: 'MINUTES')
     }
 
     parameters {
         choice(
             name: 'UPDATE_TARGET',
             choices: ['ENVIRONMENT', 'NODE'],
-            description: 'Choose which configuration to update'
+            description: 'Configuration to update'
         )
 
         choice(
             name: 'ENVIRONMENT',
             choices: ['dev', 'stage', 'uat', 'prod'],
-            description: 'Environment JSON to update'
+            description: 'Environment JSON file'
         )
 
         choice(
             name: 'NODE',
             choices: ['dev', 'stage', 'uat', 'prod'],
-            description: 'Node JSON to update'
+            description: 'Node JSON file'
         )
 
         string(
@@ -66,7 +66,7 @@ pipeline {
         string(
             name: 'NODE_REGION',
             defaultValue: 'us-east-1',
-            description: 'AWS region'
+            description: 'Node region'
         )
 
         string(
@@ -75,17 +75,42 @@ pipeline {
             description: 'Availability zone'
         )
 
+        choice(
+            name: 'BRANCH_MODE',
+            choices: ['CREATE_NEW', 'USE_EXISTING'],
+            description: 'Create a new branch or update an existing branch'
+        )
+
+        string(
+            name: 'NEW_BRANCH_NAME',
+            defaultValue: 'feature/config-update-new',
+            description: 'Branch to create when CREATE_NEW is selected'
+        )
+
+        string(
+            name: 'EXISTING_BRANCH_NAME',
+            defaultValue: 'feature/config-update',
+            description: 'Existing branch to update'
+        )
+
+        choice(
+            name: 'MERGE_BEHAVIOR',
+            choices: ['GITHUB_AUTO_MERGE', 'JENKINS_AUTO_MERGE'],
+            description: 'Choose who requests the merge after required checks pass'
+        )
+
         booleanParam(
             name: 'PUBLISH_CHANGES',
             defaultValue: true,
-            description: 'Push feature branch and create/reuse a pull request; merge after checks pass'
+            description: 'Push changes and create or reuse a pull request'
         )
     }
 
     environment {
         GITHUB_OWNER = 'Sunith3210'
         GITHUB_REPO = 'jenkins_devops_automation_project'
-        FEATURE_BRANCH = 'feature/config-update'
+        GITHUB_BASE_BRANCH = 'main'
+
         NEXUS_URL = 'http://100.54.232.46:8081/repository/jenkins-config-artifacts'
         SONAR_PROJECT_KEY = 'jenkins-config-automation'
     }
@@ -94,6 +119,7 @@ pipeline {
         stage('Checkout main') {
             steps {
                 deleteDir()
+
                 git branch: 'main',
                     credentialsId: 'github-creds',
                     url: 'https://github.com/Sunith3210/jenkins_devops_automation_project.git'
@@ -104,45 +130,109 @@ pipeline {
             steps {
                 script {
                     if (!(params.UPDATE_TARGET in ['ENVIRONMENT', 'NODE'])) {
-                        error('Choose ENVIRONMENT or NODE.')
+                        error('Invalid configuration target.')
                     }
 
-                    if (!(params.ENV_REPLICAS ==~ /^[1-9][0-9]*$/)) {
+                    if (!(params.BRANCH_MODE in ['CREATE_NEW', 'USE_EXISTING'])) {
+                        error('Invalid branch mode.')
+                    }
+
+                    if (!(params.MERGE_BEHAVIOR in [
+                        'GITHUB_AUTO_MERGE',
+                        'JENKINS_AUTO_MERGE'
+                    ])) {
+                        error('Invalid merge behavior.')
+                    }
+
+                    if (!(params.ENVIRONMENT in ['dev', 'stage', 'uat', 'prod'])) {
+                        error('Invalid environment.')
+                    }
+
+                    if (!(params.NODE in ['dev', 'stage', 'uat', 'prod'])) {
+                        error('Invalid node environment.')
+                    }
+
+                    if (!(params.ENV_LOGLEVEL in ['INFO', 'DEBUG', 'WARN', 'ERROR'])) {
+                        error('Invalid log level.')
+                    }
+
+                    if (!(params.NODE_TYPE in ['worker', 'control-plane'])) {
+                        error('Invalid node type.')
+                    }
+
+                    if (!(params.ENV_REPLICAS ==~ '[1-9][0-9]*')) {
                         error('Replicas must be a positive integer.')
                     }
 
-                    if (!(params.ENV_APPNAME ==~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/)) {
+                    if (!(params.ENV_APPNAME ==~ '[A-Za-z0-9][A-Za-z0-9._-]*')) {
                         error('Invalid application name.')
                     }
 
-                    if (!(params.ENV_VERSION ==~ /^[A-Za-z0-9][A-Za-z0-9._+-]*$/)) {
-                        error('Invalid version.')
+                    if (!(params.ENV_VERSION ==~ '[A-Za-z0-9][A-Za-z0-9._+-]*')) {
+                        error('Invalid application version.')
                     }
 
-                    if (!(params.NODE_NAME ==~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/)) {
+                    if (!(params.NODE_NAME ==~ '[A-Za-z0-9][A-Za-z0-9._-]*')) {
                         error('Invalid node name.')
                     }
 
-                    if (!(params.NODE_REGION ==~ /^[A-Za-z0-9-]+$/) ||
-                        !(params.NODE_AZ ==~ /^[A-Za-z0-9-]+$/)) {
+                    if (!(params.NODE_REGION ==~ '[A-Za-z0-9-]+') ||
+                        !(params.NODE_AZ ==~ '[A-Za-z0-9-]+')) {
                         error('Invalid node region or availability zone.')
                     }
 
-                    env.TARGET_FILE = params.UPDATE_TARGET == 'ENVIRONMENT'
+                    env.ACTIVE_BRANCH_NAME = (
+                        params.BRANCH_MODE == 'CREATE_NEW'
+                        ? params.NEW_BRANCH_NAME.trim()
+                        : params.EXISTING_BRANCH_NAME.trim()
+                    )
+
+                    /*
+                     * Use a quoted regex string instead of a slashy regex.
+                     * This avoids the Groovy parser error caused by "/" in
+                     * the branch-name character class.
+                     */
+                    if (!(env.ACTIVE_BRANCH_NAME ==~
+                        '[A-Za-z0-9][A-Za-z0-9._/-]*')) {
+                        error('Invalid Git branch name.')
+                    }
+
+                    if (env.ACTIVE_BRANCH_NAME in ['main', 'master']) {
+                        error('Never use main or master as the update branch.')
+                    }
+
+                    if (env.ACTIVE_BRANCH_NAME.endsWith('/') ||
+                        env.ACTIVE_BRANCH_NAME.endsWith('.') ||
+                        env.ACTIVE_BRANCH_NAME.contains('..') ||
+                        env.ACTIVE_BRANCH_NAME.contains('//') ||
+                        env.ACTIVE_BRANCH_NAME.contains('@{') ||
+                        env.ACTIVE_BRANCH_NAME.endsWith('.lock')) {
+                        error('Invalid Git branch name.')
+                    }
+
+                    env.TARGET_FILE = (
+                        params.UPDATE_TARGET == 'ENVIRONMENT'
                         ? "environment/${params.ENVIRONMENT}.json"
                         : "node/${params.NODE}.json"
+                    )
+
+                    echo "Update target: ${params.UPDATE_TARGET}"
+                    echo "Branch mode: ${params.BRANCH_MODE}"
+                    echo "Selected branch: ${env.ACTIVE_BRANCH_NAME}"
+                    echo "Merge behavior: ${params.MERGE_BEHAVIOR}"
+                    echo "Target file: ${env.TARGET_FILE}"
                 }
 
                 sh '''
                     set -eu
                     test -f "$TARGET_FILE"
                     python3 -m json.tool "$TARGET_FILE" >/dev/null
-                    echo "Selected target: $TARGET_FILE"
+                    echo "Configuration JSON is valid."
                 '''
             }
         }
 
-        stage('Prepare fixed feature branch') {
+        stage('Prepare selected branch') {
             steps {
                 sh '''
                     set -eu
@@ -153,17 +243,33 @@ pipeline {
                     git fetch origin main
                     git checkout -B main origin/main
 
-                    if git ls-remote --exit-code --heads origin "$FEATURE_BRANCH" >/dev/null 2>&1; then
-                        git fetch origin "$FEATURE_BRANCH"
-                        git checkout -B "$FEATURE_BRANCH" "origin/$FEATURE_BRANCH"
+                    if [ "$BRANCH_MODE" = "CREATE_NEW" ]; then
+                        if git ls-remote --exit-code --heads origin \
+                            "$ACTIVE_BRANCH_NAME" >/dev/null 2>&1; then
+                            echo "ERROR: Branch already exists."
+                            echo "Choose another NEW_BRANCH_NAME or select USE_EXISTING."
+                            exit 1
+                        fi
 
-                        # Bring the latest main changes into the feature branch.
-                        git merge origin/main
+                        git checkout -b "$ACTIVE_BRANCH_NAME" origin/main
+                        echo "Created new branch from main."
                     else
-                        git checkout -b "$FEATURE_BRANCH"
+                        if ! git ls-remote --exit-code --heads origin \
+                            "$ACTIVE_BRANCH_NAME" >/dev/null 2>&1; then
+                            echo "ERROR: Selected remote branch does not exist."
+                            exit 1
+                        fi
+
+                        git fetch origin "$ACTIVE_BRANCH_NAME"
+
+                        git checkout -B "$ACTIVE_BRANCH_NAME" \
+                            "origin/$ACTIVE_BRANCH_NAME"
+
+                        git merge --no-edit origin/main
+                        echo "Existing branch prepared."
                     fi
 
-                    echo "Using branch: $FEATURE_BRANCH"
+                    echo "Active branch: $ACTIVE_BRANCH_NAME"
                 '''
             }
         }
@@ -178,7 +284,9 @@ pipeline {
                     "CONFIG_NODE_NAME=${params.NODE_NAME}",
                     "CONFIG_NODE_TYPE=${params.NODE_TYPE}",
                     "CONFIG_REGION=${params.NODE_REGION}",
-                    "CONFIG_AZ=${params.NODE_AZ}"
+                    "CONFIG_AZ=${params.NODE_AZ}",
+                    "CONFIG_ENVIRONMENT=${params.ENVIRONMENT}",
+                    "CONFIG_NODE_ENV=${params.NODE}"
                 ]) {
                     sh '''
                         set -eu
@@ -193,13 +301,13 @@ with open(target, encoding="utf-8") as f:
     data = json.load(f)
 
 if os.environ["UPDATE_TARGET"] == "ENVIRONMENT":
-    data["environment"] = os.environ["ENVIRONMENT"]
+    data["environment"] = os.environ["CONFIG_ENVIRONMENT"]
     data["appName"] = os.environ["APP_NAME"]
     data["version"] = os.environ["APP_VERSION"]
     data["replicas"] = int(os.environ["APP_REPLICAS"])
     data["logLevel"] = os.environ["APP_LOGLEVEL"]
 else:
-    data["environment"] = os.environ["NODE"]
+    data["environment"] = os.environ["CONFIG_NODE_ENV"]
     data["nodeName"] = os.environ["CONFIG_NODE_NAME"]
     data["nodeType"] = os.environ["CONFIG_NODE_TYPE"]
     data["region"] = os.environ["CONFIG_REGION"]
@@ -288,7 +396,10 @@ PY
 
                         case "$CODE" in
                             200|201|204) ;;
-                            *) echo "Nexus upload failed"; exit 1 ;;
+                            *)
+                                echo "ERROR: Nexus upload failed."
+                                exit 1
+                                ;;
                         esac
 
                         CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
@@ -319,7 +430,7 @@ PY
             }
         }
 
-        stage('Publish branch and create/reuse PR') {
+        stage('Push branch and create or merge PR') {
             when {
                 expression { params.PUBLISH_CHANGES }
             }
@@ -336,84 +447,312 @@ PY
                         set +x
                         set -eu
 
-                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" | base64 | tr -d '\\n')
+                        AUTH=$(printf '%s' "$GITHUB_USER:$GITHUB_TOKEN" \
+                            | base64 | tr -d '\\n')
 
                         git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
-                            push origin "HEAD:refs/heads/$FEATURE_BRANCH"
+                            push origin "HEAD:refs/heads/$ACTIVE_BRANCH_NAME"
 
                         git fetch origin main
 
-                        # Stop if there are no file differences compared with main.
                         if git diff --quiet origin/main HEAD; then
-                            echo "No file differences from main. Nothing to merge."
+                            echo "No differences from main."
+                            echo "No pull request or merge is necessary."
                             exit 0
                         fi
 
-                        PR_QUERY_URL="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls?state=open&head=${GITHUB_OWNER}:${FEATURE_BRANCH}&base=main"
+                        export GITHUB_BASE_BRANCH
+                        export ACTIVE_BRANCH_NAME
+                        export MERGE_BEHAVIOR
 
-                        CODE=$(curl -sS -o pulls.json -w "%{http_code}" \
-                            -u "$GITHUB_USER:$GITHUB_TOKEN" \
-                            -H "Accept: application/vnd.github+json" \
-                            "$PR_QUERY_URL")
-
-                        if [ "$CODE" != "200" ]; then
-                            echo "Could not check existing pull requests. HTTP $CODE"
-                            cat pulls.json
-                            exit 1
-                        fi
-
-                        PR_NUMBER=$(python3 -c '
-import json
-with open("pulls.json", encoding="utf-8") as f:
-    pulls = json.load(f)
-print(pulls[0]["number"] if pulls else "")
-')
-
-                        if [ -z "$PR_NUMBER" ]; then
-                            python3 <<'PY'
+                        python3 <<'PY'
 import json
 import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
-with open("pr-request.json", "w", encoding="utf-8") as f:
-    json.dump({
-        "title": "Automated configuration update",
-        "body": (
-            "Configuration update created by Jenkins after "
-            "the SonarQube quality gate and Nexus upload succeeded."
-        ),
-        "head": os.environ["FEATURE_BRANCH"],
-        "base": "main"
-    }, f)
+owner = os.environ["GITHUB_OWNER"]
+repo = os.environ["GITHUB_REPO"]
+base = os.environ["GITHUB_BASE_BRANCH"]
+branch = os.environ["ACTIVE_BRANCH_NAME"]
+mode = os.environ["MERGE_BEHAVIOR"]
+token = os.environ["GITHUB_TOKEN"]
+build_number = os.environ["BUILD_NUMBER"]
+
+api = "https://api.github.com"
+
+headers = {
+    "Authorization": "Bearer " + token,
+    "Accept": "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "Content-Type": "application/json",
+}
+
+def request(url, method="GET", payload=None):
+    data = None if payload is None else json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method=method
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            raw = response.read().decode()
+            return response.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode()
+        try:
+            body = json.loads(raw)
+        except Exception:
+            body = {"message": raw}
+
+        raise RuntimeError(
+            f"GitHub API HTTP {exc.code}: {body}"
+        ) from exc
+
+def endpoint(path):
+    return api + path
+
+try:
+    query = urllib.parse.urlencode({
+        "state": "open",
+        "head": owner + ":" + branch,
+        "base": base,
+        "per_page": "100",
+    })
+
+    _, pulls = request(
+        endpoint(f"/repos/{owner}/{repo}/pulls?{query}")
+    )
+
+    if pulls:
+        pr = pulls[0]
+        print("Reusing pull request:", pr["html_url"])
+    else:
+        _, pr = request(
+            endpoint(f"/repos/{owner}/{repo}/pulls"),
+            "POST",
+            {
+                "title": f"Automated configuration update - build {build_number}",
+                "body": (
+                    "Configuration update created by Jenkins after "
+                    "JSON validation, SonarQube quality gate, and Nexus "
+                    "upload succeeded. Required GitHub checks must pass "
+                    "before this pull request can merge."
+                ),
+                "head": branch,
+                "base": base,
+            },
+        )
+        print("Created pull request:", pr["html_url"])
+
+    number = pr["number"]
+    pr_id = pr["node_id"]
+    head_sha = pr["head"]["sha"]
+
+    print("Pull request:", pr["html_url"])
+    print("Head commit:", head_sha)
+
+    # Verify that branch protection exposes required status checks.
+    try:
+        _, protection = request(
+            endpoint(
+                f"/repos/{owner}/{repo}/branches/"
+                f"{urllib.parse.quote(base, safe='')}/protection"
+            )
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "Cannot verify branch protection and required checks. "
+            "Configure required status checks on the base branch and "
+            "grant the GitHub credential permission to read protection "
+            "settings. Original error: " + str(exc)
+        ) from exc
+
+    required_block = protection.get("required_status_checks") or {}
+    required = set(required_block.get("contexts") or [])
+    required.update(
+        item["context"]
+        for item in required_block.get("checks") or []
+        if item.get("context")
+    )
+
+    if not required:
+        raise RuntimeError(
+            f"Branch '{base}' has no required status checks. "
+            "Configure required checks before merging."
+        )
+
+    print("Required checks:", ", ".join(sorted(required)))
+
+    if mode == "GITHUB_AUTO_MERGE":
+        # GitHub will merge only when its rules and required checks pass.
+        if pr.get("auto_merge"):
+            print("GitHub auto-merge is already enabled.")
+        else:
+            mutation = """
+            mutation($id: ID!) {
+              enablePullRequestAutoMerge(
+                input: {pullRequestId: $id, mergeMethod: SQUASH}
+              ) {
+                pullRequest {
+                  number
+                  url
+                  autoMergeRequest { enabledAt }
+                }
+              }
+            }
+            """
+
+            _, result = request(
+                endpoint("/graphql"),
+                "POST",
+                {
+                    "query": mutation,
+                    "variables": {"id": pr_id},
+                },
+            )
+
+            if result.get("errors"):
+                raise RuntimeError(
+                    "Could not enable GitHub auto-merge: "
+                    + json.dumps(result["errors"])
+                )
+
+        print("RESULT: GitHub auto-merge enabled.")
+        print("GitHub will merge after required checks and rules pass.")
+        print("The pull request may remain open while checks are pending.")
+        sys.exit(0)
+
+    # Jenkins mode: poll required status contexts before requesting merge.
+    deadline = time.monotonic() + 20 * 60
+
+    while time.monotonic() < deadline:
+        _, check_data = request(
+            endpoint(
+                f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
+                "?per_page=100"
+            )
+        )
+        runs = check_data.get("check_runs", [])
+
+        _, status_data = request(
+            endpoint(f"/repos/{owner}/{repo}/commits/{head_sha}/status")
+        )
+        statuses = status_data.get("statuses", [])
+
+        pending = []
+        failures = []
+
+        for name in sorted(required):
+            matching_runs = [r for r in runs if r.get("name") == name]
+            matching_statuses = [
+                s for s in statuses if s.get("context") == name
+            ]
+
+            failed_runs = [
+                r for r in matching_runs
+                if r.get("status") == "completed"
+                and r.get("conclusion") not in ("success", "neutral", "skipped")
+            ]
+
+            failed_statuses = [
+                s for s in matching_statuses
+                if s.get("state") in ("failure", "error")
+            ]
+
+            if failed_runs or failed_statuses:
+                failures.append(name)
+                continue
+
+            successful_run = any(
+                r.get("status") == "completed"
+                and r.get("conclusion") == "success"
+                for r in matching_runs
+            )
+
+            successful_status = any(
+                s.get("state") == "success"
+                for s in matching_statuses
+            )
+
+            if not (successful_run or successful_status):
+                pending.append(name)
+
+        if failures:
+            raise RuntimeError(
+                "Required GitHub checks FAILED: "
+                + ", ".join(failures)
+                + ". Pull request will not be merged."
+            )
+
+        if not pending:
+            print("All required GitHub checks passed.")
+            break
+
+        print("Waiting for required checks:", ", ".join(pending))
+        time.sleep(15)
+    else:
+        raise RuntimeError(
+            "Timed out waiting for required GitHub checks. "
+            "Pull request will not be merged."
+        )
+
+    # Refresh PR state to ensure the head has not changed.
+    _, latest_pr = request(
+        endpoint(f"/repos/{owner}/{repo}/pulls/{number}")
+    )
+
+    if latest_pr["head"]["sha"] != head_sha:
+        raise RuntimeError(
+            "PR head changed while checks were running. "
+            "Run the pipeline again to verify the latest commit."
+        )
+
+    if latest_pr.get("state") != "open":
+        raise RuntimeError("Pull request is no longer open.")
+
+    # GitHub remains the final authority for branch protection and merging.
+    _, result = request(
+        endpoint(f"/repos/{owner}/{repo}/pulls/{number}/merge"),
+        "PUT",
+        {"merge_method": "squash"},
+    )
+
+    if result.get("merged") is not True:
+        raise RuntimeError(
+            "GitHub did not confirm that the pull request was merged."
+        )
+
+    print("RESULT: MERGE SUCCESSFUL.")
+    print("Merged PR:", pr["html_url"])
+    print("GitHub message:", result.get("message", "Merged"))
+
+except Exception as exc:
+    print("ERROR:", str(exc), file=sys.stderr)
+    sys.exit(1)
 PY
-
-                            CODE=$(curl -sS -o pr-response.json -w "%{http_code}" \
-                                -u "$GITHUB_USER:$GITHUB_TOKEN" \
-                                -H "Accept: application/vnd.github+json" \
-                                -H "Content-Type: application/json" \
-                                -d @pr-request.json \
-                                "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls")
-
-                            if [ "$CODE" != "201" ]; then
-                                echo "PR creation failed. HTTP $CODE"
-                                python3 -m json.tool pr-response.json || true
-                                exit 1
-                            fi
-
-                            PR_NUMBER=$(python3 -c '
-import json
-with open("pr-response.json", encoding="utf-8") as f:
-    print(json.load(f)["number"])
-')
-
-                            echo "Created pull request #$PR_NUMBER"
-                        else
-                            echo "Reusing existing pull request #$PR_NUMBER"
-                        fi
-
-                        echo "Pull request URL:"
-                        echo "https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/pull/${PR_NUMBER}"
-                        echo "Wait for required GitHub checks to pass, review the changes, and merge the PR through GitHub."
                     '''
+                }
+            }
+        }
+
+        stage('Report result') {
+            steps {
+                script {
+                    if (!params.PUBLISH_CHANGES) {
+                        echo 'PUBLISH_CHANGES=false: no push or PR operation was requested.'
+                    } else if (params.MERGE_BEHAVIOR == 'GITHUB_AUTO_MERGE') {
+                        echo 'GitHub auto-merge was requested. Check the previous stage for confirmation.'
+                        echo 'The PR may remain open while GitHub waits for required checks.'
+                    } else {
+                        echo 'Jenkins automatic merge was requested. Check the previous stage for the merge result.'
+                    }
                 }
             }
         }
@@ -421,21 +760,20 @@ with open("pr-response.json", encoding="utf-8") as f:
 
     post {
         success {
-            echo "Pipeline succeeded. Target: ${params.UPDATE_TARGET}"
-            echo "Feature branch: feature/config-update"
-
-            script {
-                if (params.PUBLISH_CHANGES) {
-                    echo "Publishing was enabled. Check the console log for the pull request URL."
-                    echo "Jenkins does not automatically merge the pull request."
-                } else {
-                    echo "Publishing was disabled. No push or pull request was attempted."
-                }
-            }
+            echo "PIPELINE SUCCESS: ${params.UPDATE_TARGET}"
+            echo "Branch: ${env.ACTIVE_BRANCH_NAME ?: 'not selected'}"
+            echo "Merge behavior: ${params.MERGE_BEHAVIOR}"
+            echo 'Review the stage logs for the exact PR and merge status.'
         }
 
         failure {
-            echo 'Pipeline failed. Check the console output before retrying.'
+            echo 'PIPELINE FAILED.'
+            echo 'Check the failed stage and console output.'
+            echo 'A failed required check prevents Jenkins automatic merging.'
+        }
+
+        aborted {
+            echo 'PIPELINE ABORTED. No successful merge is claimed.'
         }
 
         always {
