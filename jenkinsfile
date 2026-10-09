@@ -27,30 +27,58 @@ pipeline {
             description: 'Node JSON to update'
         )
 
-        string(name: 'ENV_APPNAME', defaultValue: 'myapp',
-               description: 'Application name')
-        string(name: 'ENV_VERSION', defaultValue: '2.0.0',
-               description: 'Application version')
-        string(name: 'ENV_REPLICAS', defaultValue: '1',
-               description: 'Positive replica count')
-        choice(name: 'ENV_LOGLEVEL',
-               choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'],
-               description: 'Application log level')
+        string(
+            name: 'ENV_APPNAME',
+            defaultValue: 'myapp',
+            description: 'Application name'
+        )
 
-        string(name: 'NODE_NAME', defaultValue: 'node-01',
-               description: 'Node name')
-        choice(name: 'NODE_TYPE',
-               choices: ['worker', 'control-plane'],
-               description: 'Node type')
-        string(name: 'NODE_REGION', defaultValue: 'us-east-1',
-               description: 'AWS region')
-        string(name: 'NODE_AZ', defaultValue: 'us-east-1a',
-               description: 'Availability zone')
+        string(
+            name: 'ENV_VERSION',
+            defaultValue: '2.0.0',
+            description: 'Application version'
+        )
+
+        string(
+            name: 'ENV_REPLICAS',
+            defaultValue: '1',
+            description: 'Positive replica count'
+        )
+
+        choice(
+            name: 'ENV_LOGLEVEL',
+            choices: ['INFO', 'DEBUG', 'WARN', 'ERROR'],
+            description: 'Application log level'
+        )
+
+        string(
+            name: 'NODE_NAME',
+            defaultValue: 'node-01',
+            description: 'Node name'
+        )
+
+        choice(
+            name: 'NODE_TYPE',
+            choices: ['worker', 'control-plane'],
+            description: 'Node type'
+        )
+
+        string(
+            name: 'NODE_REGION',
+            defaultValue: 'us-east-1',
+            description: 'AWS region'
+        )
+
+        string(
+            name: 'NODE_AZ',
+            defaultValue: 'us-east-1a',
+            description: 'Availability zone'
+        )
 
         booleanParam(
             name: 'PUBLISH_CHANGES',
-            defaultValue: false,
-            description: 'Push the fixed feature branch and create or reuse a PR'
+            defaultValue: true,
+            description: 'Push feature branch, create/reuse PR, and merge into main after checks pass'
         )
     }
 
@@ -91,6 +119,15 @@ pipeline {
                         error('Invalid version.')
                     }
 
+                    if (!(params.NODE_NAME ==~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/)) {
+                        error('Invalid node name.')
+                    }
+
+                    if (!(params.NODE_REGION ==~ /^[A-Za-z0-9-]+$/) ||
+                        !(params.NODE_AZ ==~ /^[A-Za-z0-9-]+$/)) {
+                        error('Invalid node region or availability zone.')
+                    }
+
                     env.TARGET_FILE = params.UPDATE_TARGET == 'ENVIRONMENT'
                         ? "environment/${params.ENVIRONMENT}.json"
                         : "node/${params.NODE}.json"
@@ -110,6 +147,7 @@ pipeline {
             steps {
                 sh '''
                     set -eu
+
                     git config user.name "Jenkins"
                     git config user.email "jenkins@example.com"
 
@@ -119,12 +157,14 @@ pipeline {
                     if git ls-remote --exit-code --heads origin "$FEATURE_BRANCH" >/dev/null 2>&1; then
                         git fetch origin "$FEATURE_BRANCH"
                         git checkout -B "$FEATURE_BRANCH" "origin/$FEATURE_BRANCH"
+
+                        # Bring the latest main changes into the feature branch.
                         git merge origin/main
                     else
                         git checkout -b "$FEATURE_BRANCH"
                     fi
 
-                    echo "Using the single branch: $FEATURE_BRANCH"
+                    echo "Using branch: $FEATURE_BRANCH"
                 '''
             }
         }
@@ -186,6 +226,7 @@ PY
             steps {
                 script {
                     def scannerHome = tool 'sonar_scanner'
+
                     withSonarQubeEnv('devops_project') {
                         sh """
                             set -eu
@@ -213,8 +254,13 @@ PY
                 sh '''
                     set -eu
                     mkdir -p dist
-                    tar -czf "dist/config-${UPDATE_TARGET}-${BUILD_NUMBER}.tar.gz" "$TARGET_FILE"
-                    tar -tzf "dist/config-${UPDATE_TARGET}-${BUILD_NUMBER}.tar.gz"
+
+                    FILE="dist/config-${UPDATE_TARGET}-${BUILD_NUMBER}.tar.gz"
+
+                    tar -czf "$FILE" "$TARGET_FILE"
+                    tar -tzf "$FILE"
+
+                    echo "Created artifact: $FILE"
                 '''
             }
         }
@@ -240,6 +286,7 @@ PY
                             -T "$FILE" "$URL")
 
                         echo "Nexus upload HTTP status: $CODE"
+
                         case "$CODE" in
                             200|201|204) ;;
                             *) echo "Nexus upload failed"; exit 1 ;;
@@ -247,6 +294,7 @@ PY
 
                         CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
                             -u "$NEXUS_USER:$NEXUS_PASS" "$URL")
+
                         echo "Nexus read-back HTTP status: $CODE"
                         test "$CODE" = "200"
                     '''
@@ -260,21 +308,23 @@ PY
             steps {
                 sh '''
                     set -eu
-                    git add "$TARGET_FILE"
 
-                    if git diff --cached --quiet; then
-                        echo "No new configuration changes to commit."
-                    else
+                    git add -- "$TARGET_FILE"
+
+                    if ! git diff --cached --quiet; then
                         git commit -m "Update ${UPDATE_TARGET} configuration (build ${BUILD_NUMBER})"
+                    else
+                        echo "No new configuration changes to commit."
                     fi
                 '''
             }
         }
 
-        stage('Publish fixed branch and create or reuse PR') {
+        stage('Publish branch, create/reuse PR, and merge') {
             when {
                 expression { params.PUBLISH_CHANGES }
             }
+
             steps {
                 withCredentials([
                     usernamePassword(
@@ -292,14 +342,27 @@ PY
                         git -c http.extraheader="AUTHORIZATION: basic $AUTH" \
                             push origin "HEAD:refs/heads/$FEATURE_BRANCH"
 
-                        export PR_QUERY_URL="https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/pulls?state=open&head=$GITHUB_OWNER:$FEATURE_BRANCH&base=main"
+                        git fetch origin main
+
+                        # If the branch has no file changes compared with main,
+                        # there is nothing to merge.
+                        if git diff --quiet origin/main HEAD; then
+                            echo "No file differences from main. Nothing to merge."
+                            exit 0
+                        fi
+
+                        PR_QUERY_URL="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls?state=open&head=${GITHUB_OWNER}:${FEATURE_BRANCH}&base=main"
 
                         CODE=$(curl -sS -o pulls.json -w "%{http_code}" \
                             -u "$GITHUB_USER:$GITHUB_TOKEN" \
                             -H "Accept: application/vnd.github+json" \
                             "$PR_QUERY_URL")
 
-                        test "$CODE" = "200"
+                        if [ "$CODE" != "200" ]; then
+                            echo "Could not check existing pull requests. HTTP $CODE"
+                            cat pulls.json
+                            exit 1
+                        fi
 
                         PR_NUMBER=$(python3 -c '
 import json
@@ -308,15 +371,15 @@ with open("pulls.json", encoding="utf-8") as f:
 print(pulls[0]["number"] if pulls else "")
 ')
 
-                        if [ -n "$PR_NUMBER" ]; then
-                            echo "Reusing existing PR #$PR_NUMBER"
-                        else
-                            python3 - <<'PY'
-import json, os
+                        if [ -z "$PR_NUMBER" ]; then
+                            python3 <<'PY'
+import json
+import os
+
 with open("pr-request.json", "w", encoding="utf-8") as f:
     json.dump({
         "title": "Automated configuration update",
-        "body": "Configuration update created by Jenkins after the SonarQube quality gate passed.",
+        "body": "Configuration update created by Jenkins after the SonarQube quality gate and Nexus upload succeeded.",
         "head": os.environ["FEATURE_BRANCH"],
         "base": "main"
     }, f)
@@ -327,20 +390,53 @@ PY
                                 -H "Accept: application/vnd.github+json" \
                                 -H "Content-Type: application/json" \
                                 -d @pr-request.json \
-                                "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/pulls")
+                                "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls")
 
                             if [ "$CODE" != "201" ]; then
-                                echo "PR creation failed with HTTP $CODE"
+                                echo "PR creation failed. HTTP $CODE"
                                 python3 -m json.tool pr-response.json || true
                                 exit 1
                             fi
 
-                            python3 -c '
+                            PR_NUMBER=$(python3 -c '
 import json
-p = json.load(open("pr-response.json", encoding="utf-8"))
-print("Created PR:", p["html_url"])
-'
+with open("pr-response.json", encoding="utf-8") as f:
+    print(json.load(f)["number"])
+')
+
+                            echo "Created pull request #$PR_NUMBER"
+                        else
+                            echo "Reusing existing pull request #$PR_NUMBER"
                         fi
+
+                        # Merge only after all earlier pipeline stages succeeded.
+                        MERGE_URL="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls/${PR_NUMBER}/merge"
+
+                        CODE=$(curl -sS -o merge-response.json -w "%{http_code}" \
+                            -X PUT \
+                            -u "$GITHUB_USER:$GITHUB_TOKEN" \
+                            -H "Accept: application/vnd.github+json" \
+                            -H "Content-Type: application/json" \
+                            -d '{"merge_method":"squash"}' \
+                            "$MERGE_URL")
+
+                        if [ "$CODE" != "200" ]; then
+                            echo "Automatic merge failed. HTTP $CODE"
+                            python3 -m json.tool merge-response.json || true
+                            exit 1
+                        fi
+
+                        python3 <<'PY'
+import json
+
+with open("merge-response.json", encoding="utf-8") as f:
+    result = json.load(f)
+
+if not result.get("merged", False):
+    raise SystemExit("GitHub did not confirm the merge.")
+
+print("Merge successful:", result.get("message", "Merged into main"))
+PY
                     '''
                 }
             }
@@ -351,10 +447,19 @@ print("Created PR:", p["html_url"])
         success {
             echo "Pipeline succeeded. Target: ${params.UPDATE_TARGET}"
             echo "Feature branch: feature/config-update"
+            script {
+                if (params.PUBLISH_CHANGES) {
+                    echo "Publishing was enabled; see the console log to confirm the merge result."
+                } else {
+                    echo "Publishing was disabled; no push or automatic merge was attempted."
+                }
+            }
         }
+
         failure {
             echo 'Pipeline failed. Check the console output before retrying.'
         }
+
         always {
             cleanWs(deleteDirs: true, notFailBuild: true)
         }
