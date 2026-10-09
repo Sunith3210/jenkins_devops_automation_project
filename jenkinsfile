@@ -78,7 +78,7 @@ pipeline {
         booleanParam(
             name: 'PUBLISH_CHANGES',
             defaultValue: true,
-            description: 'Push feature branch, create/reuse PR, and merge into main after checks pass'
+            description: 'Push feature branch and create/reuse a pull request; merge after checks pass'
         )
     }
 
@@ -137,8 +137,7 @@ pipeline {
                     set -eu
                     test -f "$TARGET_FILE"
                     python3 -m json.tool "$TARGET_FILE" >/dev/null
-                    echo "Selected target: $UPDATE_TARGET"
-                    echo "Selected file: $TARGET_FILE"
+                    echo "Selected target: $TARGET_FILE"
                 '''
             }
         }
@@ -320,7 +319,7 @@ PY
             }
         }
 
-        stage('Publish branch, create/reuse PR, and merge') {
+        stage('Publish branch and create/reuse PR') {
             when {
                 expression { params.PUBLISH_CHANGES }
             }
@@ -344,8 +343,7 @@ PY
 
                         git fetch origin main
 
-                        # If the branch has no file changes compared with main,
-                        # there is nothing to merge.
+                        # Stop if there are no file differences compared with main.
                         if git diff --quiet origin/main HEAD; then
                             echo "No file differences from main. Nothing to merge."
                             exit 0
@@ -379,7 +377,10 @@ import os
 with open("pr-request.json", "w", encoding="utf-8") as f:
     json.dump({
         "title": "Automated configuration update",
-        "body": "Configuration update created by Jenkins after the SonarQube quality gate and Nexus upload succeeded.",
+        "body": (
+            "Configuration update created by Jenkins after "
+            "the SonarQube quality gate and Nexus upload succeeded."
+        ),
         "head": os.environ["FEATURE_BRANCH"],
         "base": "main"
     }, f)
@@ -409,34 +410,9 @@ with open("pr-response.json", encoding="utf-8") as f:
                             echo "Reusing existing pull request #$PR_NUMBER"
                         fi
 
-                        # Merge only after all earlier pipeline stages succeeded.
-                        MERGE_URL="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls/${PR_NUMBER}/merge"
-
-                        CODE=$(curl -sS -o merge-response.json -w "%{http_code}" \
-                            -X PUT \
-                            -u "$GITHUB_USER:$GITHUB_TOKEN" \
-                            -H "Accept: application/vnd.github+json" \
-                            -H "Content-Type: application/json" \
-                            -d '{"merge_method":"squash"}' \
-                            "$MERGE_URL")
-
-                        if [ "$CODE" != "200" ]; then
-                            echo "Automatic merge failed. HTTP $CODE"
-                            python3 -m json.tool merge-response.json || true
-                            exit 1
-                        fi
-
-                        python3 <<'PY'
-import json
-
-with open("merge-response.json", encoding="utf-8") as f:
-    result = json.load(f)
-
-if not result.get("merged", False):
-    raise SystemExit("GitHub did not confirm the merge.")
-
-print("Merge successful:", result.get("message", "Merged into main"))
-PY
+                        echo "Pull request URL:"
+                        echo "https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/pull/${PR_NUMBER}"
+                        echo "Wait for required GitHub checks to pass, review the changes, and merge the PR through GitHub."
                     '''
                 }
             }
@@ -447,11 +423,13 @@ PY
         success {
             echo "Pipeline succeeded. Target: ${params.UPDATE_TARGET}"
             echo "Feature branch: feature/config-update"
+
             script {
                 if (params.PUBLISH_CHANGES) {
-                    echo "Publishing was enabled; see the console log to confirm the merge result."
+                    echo "Publishing was enabled. Check the console log for the pull request URL."
+                    echo "Jenkins does not automatically merge the pull request."
                 } else {
-                    echo "Publishing was disabled; no push or automatic merge was attempted."
+                    echo "Publishing was disabled. No push or pull request was attempted."
                 }
             }
         }
