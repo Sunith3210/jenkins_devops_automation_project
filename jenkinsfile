@@ -8,6 +8,9 @@ pipeline {
     }
 
     parameters {
+        choice(name: 'UPDATE_TARGET',
+               choices: ['environment', 'node'],
+               description: 'Choose which configuration type to update')
         choice(name: 'ENVIRONMENT',
                choices: ['dev', 'stage', 'uat', 'prod'],
                description: 'Environment JSON to update')
@@ -64,61 +67,67 @@ pipeline {
             }
         }
 
+
         stage('Validate parameters') {
             steps {
                 script {
                     if (!(params.ENV_REPLICAS ==~ /^[1-9][0-9]*$/)) {
                         error('ENV_REPLICAS must be a positive integer.')
                     }
-
                     if (!(params.ENV_VERSION ==~ /^[A-Za-z0-9][A-Za-z0-9._+-]*$/)) {
                         error('ENV_VERSION contains unsupported characters.')
                     }
-
                     if (!(params.ENV_APPNAME ==~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/)) {
                         error('ENV_APPNAME contains unsupported characters.')
                     }
-
                     if (!(params.NODE_NAME ==~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/)) {
                         error('NODE_NAME contains unsupported characters.')
                     }
-
                     if (!(params.NODE_REGION ==~ /^[a-z0-9-]+$/) ||
                         !(params.NODE_AZ ==~ /^[a-z0-9-]+$/)) {
                         error('Region or availability zone contains unsupported characters.')
                     }
                 }
-
                 sh '''
                     set -eu
-                    python3 --version
-                    test -f "environment/${ENVIRONMENT}.json"
-                    test -f "node/${NODE}.json"
-                    python3 -m json.tool "environment/${ENVIRONMENT}.json" >/dev/null
-                    python3 -m json.tool "node/${NODE}.json" >/dev/null
-                    echo "Input JSON files are present and valid."
+                    case "$UPDATE_TARGET" in
+                        environment) FILE="environment/${ENVIRONMENT}.json" ;;
+                        node)        FILE="node/${NODE}.json" ;;
+                        *) echo "Invalid UPDATE_TARGET"; exit 1 ;;
+                    esac
+                    test -f "$FILE"
+                    python3 -m json.tool "$FILE" >/dev/null
+                    echo "Selected JSON is present and valid: $FILE"
                 '''
             }
         }
 
-        stage('Create unique branch') {
+        stage('Prepare fixed feature branch') {
             steps {
                 script {
-                    env.FEATURE_BRANCH =
-                        "automation/${params.ENVIRONMENT}-${params.NODE}-build-${env.BUILD_NUMBER}"
+                    env.FEATURE_BRANCH = 'feature/config-update'
                 }
-
                 sh '''
                     set -eu
                     git config user.name "Jenkins"
                     git config user.email "jenkins@example.com"
-                    git checkout -b "$FEATURE_BRANCH"
-                    echo "Prepared branch: $FEATURE_BRANCH"
+                    git fetch origin main
+
+                    if git ls-remote --exit-code --heads origin "$FEATURE_BRANCH" >/dev/null 2>&1; then
+                        echo "Reusing existing branch: $FEATURE_BRANCH"
+                        git fetch origin "$FEATURE_BRANCH"
+                        git checkout -B "$FEATURE_BRANCH" "origin/$FEATURE_BRANCH"
+                    else
+                        echo "Creating feature branch for the first time: $FEATURE_BRANCH"
+                        git checkout -b "$FEATURE_BRANCH" origin/main
+                    fi
+
+                    git branch --show-current
                 '''
             }
         }
 
-        stage('Update JSON files') {
+        stage('Update selected JSON') {
             steps {
                 withEnv([
                     "APP_NAME=${params.ENV_APPNAME}",
@@ -132,54 +141,50 @@ pipeline {
                 ]) {
                     sh '''
                         set -eu
-
-                        python3 <<'PY'
+                        python3 <<'PYTHON'
 import json
 import os
 from pathlib import Path
 
-env_name = os.environ["ENVIRONMENT"]
-node_name = os.environ["NODE"]
+target = os.environ["UPDATE_TARGET"]
 
-env_path = Path("environment") / f"{env_name}.json"
-node_path = Path("node") / f"{node_name}.json"
-
-with env_path.open(encoding="utf-8") as f:
-    env_data = json.load(f)
-
-with node_path.open(encoding="utf-8") as f:
-    node_data = json.load(f)
-
-env_data["environment"] = env_name
-env_data["appName"] = os.environ["APP_NAME"]
-env_data["version"] = os.environ["APP_VERSION"]
-env_data["replicas"] = int(os.environ["APP_REPLICAS"])
-env_data["logLevel"] = os.environ["APP_LOGLEVEL"]
-
-node_data["environment"] = node_name
-node_data["nodeName"] = os.environ["CONFIG_NODE_NAME"]
-node_data["nodeType"] = os.environ["CONFIG_NODE_TYPE"]
-node_data["region"] = os.environ["CONFIG_REGION"]
-node_data["availabilityZone"] = os.environ["CONFIG_AZ"]
-
-for path, data in [(env_path, env_data), (node_path, node_data)]:
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\\n")
+if target == "environment":
+    path = Path("environment") / (os.environ["ENVIRONMENT"] + ".json")
     with path.open(encoding="utf-8") as f:
-        json.load(f)
+        data = json.load(f)
+    data["environment"] = os.environ["ENVIRONMENT"]
+    data["appName"] = os.environ["APP_NAME"]
+    data["version"] = os.environ["APP_VERSION"]
+    data["replicas"] = int(os.environ["APP_REPLICAS"])
+    data["logLevel"] = os.environ["APP_LOGLEVEL"]
 
-print(f"Updated and validated {env_path}")
-print(f"Updated and validated {node_path}")
-PY
+elif target == "node":
+    path = Path("node") / (os.environ["NODE"] + ".json")
+    with path.open(encoding="utf-8") as f:
+        data = json.load(f)
+    data["environment"] = os.environ["NODE"]
+    data["nodeName"] = os.environ["CONFIG_NODE_NAME"]
+    data["nodeType"] = os.environ["CONFIG_NODE_TYPE"]
+    data["region"] = os.environ["CONFIG_REGION"]
+    data["availabilityZone"] = os.environ["CONFIG_AZ"]
 
-                        echo "Configuration diff:"
+else:
+    raise SystemExit("UPDATE_TARGET must be environment or node")
+
+with path.open("w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+
+with path.open(encoding="utf-8") as f:
+    json.load(f)
+
+print("Updated and validated:", path)
+PYTHON
                         git diff -- "environment/${ENVIRONMENT}.json" "node/${NODE}.json"
                     '''
                 }
             }
         }
-
         stage('SonarQube analysis') {
             steps {
                 script {
@@ -207,19 +212,27 @@ PY
             }
         }
 
-        stage('Package configuration artifact') {
+
+        stage('Package selected configuration') {
             steps {
                 sh '''
                     set -eu
                     mkdir -p dist
-                    tar -czf "dist/config-${ENVIRONMENT}-${NODE}-${BUILD_NUMBER}.tar.gz" \
-                        "environment/${ENVIRONMENT}.json" \
-                        "node/${NODE}.json"
-                    tar -tzf "dist/config-${ENVIRONMENT}-${NODE}-${BUILD_NUMBER}.tar.gz"
+                    FILE=""
+
+                    case "$UPDATE_TARGET" in
+                        environment) FILE="environment/${ENVIRONMENT}.json" ;;
+                        node)        FILE="node/${NODE}.json" ;;
+                        *) echo "Invalid UPDATE_TARGET"; exit 1 ;;
+                    esac
+
+                    ARTIFACT="dist/config-${UPDATE_TARGET}-${BUILD_NUMBER}.tar.gz"
+                    tar -czf "$ARTIFACT" "$FILE"
+                    tar -tzf "$ARTIFACT"
+                    echo "Created artifact: $ARTIFACT"
                 '''
             }
         }
-
         stage('Upload artifact to Nexus') {
             steps {
                 withCredentials([
@@ -258,23 +271,27 @@ PY
             }
         }
 
+
         stage('Prepare Git change') {
             steps {
                 sh '''
                     set -eu
-                    git add "environment/${ENVIRONMENT}.json" "node/${NODE}.json"
+                    case "$UPDATE_TARGET" in
+                        environment) git add "environment/${ENVIRONMENT}.json" ;;
+                        node)        git add "node/${NODE}.json" ;;
+                        *) echo "Invalid UPDATE_TARGET"; exit 1 ;;
+                    esac
 
                     if git diff --cached --quiet; then
-                        echo "No configuration changes were produced."
+                        echo "No changes to commit."
                         exit 1
                     fi
 
-                    git commit -m "Update ${ENVIRONMENT} and ${NODE} configuration (build ${BUILD_NUMBER})"
+                    git commit -m "Update ${UPDATE_TARGET} configuration (build ${BUILD_NUMBER})"
                     git status --short
                 '''
             }
         }
-
         stage('Publish branch and create PR') {
             when {
                 expression { return params.PUBLISH_CHANGES }
