@@ -1,6 +1,6 @@
 {
   "environment": "dev",
-  "appName": "MalemSunith",
+  "appName": "malemsushma",
   "version": "2.0.0",
   "replicas": 1,
   "logLevel": "INFO",
