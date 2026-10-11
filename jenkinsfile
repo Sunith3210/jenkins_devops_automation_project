@@ -111,7 +111,7 @@ pipeline {
         GITHUB_REPO = 'jenkins_devops_automation_project'
         GITHUB_BASE_BRANCH = 'main'
 
-        NEXUS_URL = 'http://100.54.232.46:8081/repository/jenkins-config-artifacts'
+        NEXUS_URL = 'http://32.195.67.231:8081/repository/jenkins-config-artifacts'
         SONAR_PROJECT_KEY = 'jenkins-config-automation'
     }
 
