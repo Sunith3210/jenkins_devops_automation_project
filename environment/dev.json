@@ -1,6 +1,6 @@
 {
   "environment": "dev",
-  "appName": "CHINTU3210",
+  "appName": "ARAVIND",
   "version": "2.0.0",
   "replicas": 1,
   "logLevel": "INFO",
